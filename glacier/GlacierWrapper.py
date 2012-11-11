@@ -95,12 +95,12 @@ class GlacierWrapper(object):
     MAX_PARTS = 10000
     AVAILABLE_REGIONS = ('us-east-1', 'us-west-2', 'us-west-1',
                          'eu-west-1', 'ap-northeast-1')
-    AVAILABLE_REGIONS_MESSAGE = """Invalid region. Available regions for Amazon Glacier are:
-us-east-1 (US - Virginia)
-us-west-1 (US - N. California)
-us-west-2 (US - Oregon)
-eu-west-1 (EU - Ireland)
-ap-northeast-1 (Asia-Pacific - Tokyo)"""
+    AVAILABLE_REGIONS_MESSAGE = ("Invalid region. Available regions for Amazon Glacier are:\n"
+                                 "\tus-east-1 (US - Virginia)\n"
+                                 "\tus-west-1 (US - N. California)\n"
+                                 "\tus-west-2 (US - Oregon)\n"
+                                 "\teu-west-1 (EU - Ireland)\n"
+                                 "\tap-northeast-1 (Asia-Pacific - Tokyo)")
 
     def setuplogging(self, logfile, loglevel, logtostdout):
         """
@@ -150,7 +150,6 @@ ap-northeast-1 (Asia-Pacific - Tokyo)"""
             try:
                 open(logfile, 'a')
             except IOError:
-
                 # Can't open the specified log file, log to stderr instead.
                 logging.basicConfig(level=loglevel,
                                     stream=sys.stderr,
@@ -189,7 +188,10 @@ ap-northeast-1 (Asia-Pacific - Tokyo)"""
             if not hasattr(self, "glacierconn") or \
                 (hasattr(self, "glacierconn") and not self.glacierconn):
                 try:
-                    self.logger.debug("""Connecting to Amazon Glacier with \n   aws_access_key %s\n   aws_secret_key %s\n   region %s""",
+                    self.logger.debug("Connecting to Amazon Glacier with\n"
+                                      "aws_access_key %s\n"
+                                      "aws_secret_key %s\n"
+                                      "and region %s",
                                       self.aws_access_key,
                                       self.aws_secret_key,
                                       self.region)
@@ -230,18 +232,17 @@ ap-northeast-1 (Asia-Pacific - Tokyo)"""
 
             if not self.bookkeeping_domain_name:
                 raise InputException(
-                    '''\
-Bookkeeping enabled but no Amazon SimpleDB domain given.
-Provide a domain in either the config file or via the
-command line, or disable bookkeeping.''',
+                    "Bookkeeping enabled but no Amazon SimpleDB domain given\n"
+                    "Provide a domain in either the config file or via the"
+                    "command line, or disable bookkeeping.",
                     code="SdbConnectionError")
 
             if not hasattr(self, 'sdb_conn'):
                 try:
-                    self.logger.debug("""\
-Connecting to Amazon SimpleDB domain %s with
-    naws_access_key %s
-    naws_secret_key %s""",
+                    self.logger.debug(
+                        "Connecting to Amazon SimpleDB domain %s with"
+                        "aws_access_key %s"
+                        "aws_secret_key %s",
                                       self.bookkeeping_domain_name,
                                       self.aws_access_key,
                                       self.aws_secret_key)
@@ -275,13 +276,13 @@ Connecting to Amazon SimpleDB domain %s with
 
         if len(name) > self.MAX_VAULT_NAME_LENGTH:
             raise InputException(
-                u"Vault name can be at most %s characters long."% self.MAX_VAULT_NAME_LENGTH,
+                "Vault name can be at most %s characters long."% self.MAX_VAULT_NAME_LENGTH,
                 cause='Vault name more than %s characters long.'% self.MAX_VAULT_NAME_LENGTH,
                 code="VaultNameError")
 
         if len(name) == 0:
             raise InputException(
-                u"Vault name has to be at least 1 character long.",
+                "Vault name has to be at least 1 character long.",
                 cause='Vault name has to be at least 1 character long.',
                 code="VaultNameError")
 
@@ -291,7 +292,8 @@ Connecting to Amazon SimpleDB domain %s with
         m = re.match(self.VAULT_NAME_ALLOWED_CHARACTERS, name)
         if (m.end() if m else 0) != len(name):
             raise InputException(
-                u"""Allowed characters are a-z, A-Z, 0-9, '_' (underscore), '-' (hyphen), and '.' (period)""",
+                "Allowed characters are a-z, A-Z, 0-9, '_' (underscore),"
+                "'-' (hyphen), and '.' (period)",
                 cause='Illegal characters in the vault name.',
                 code="VaultNameError")
 
@@ -314,7 +316,7 @@ Connecting to Amazon SimpleDB domain %s with
 
         if len(description) > self.MAX_VAULT_DESCRIPTION_LENGTH:
             raise InputException(
-                u"Description must be no more than %s characters."% self.MAX_VAULT_DESCRIPTION_LENGTH,
+                "Description must be no more than %s characters."% self.MAX_VAULT_DESCRIPTION_LENGTH,
                 cause='Vault description contains more than %s characters.'% self.MAX_VAULT_DESCRIPTION_LENGTH,
                 code="VaultDescriptionError")
 
@@ -322,9 +324,9 @@ Connecting to Amazon SimpleDB domain %s with
             n = ord(char)
             if n < 32 or n > 126:
                 raise InputException(
-                    u"""The allowed characters are 7-bit ASCII without \
-control codes, specifically ASCII values 32-126 decimal \
-or 0x20-0x7E hexadecimal.""",
+                     "The allowed characters are 7-bit ASCII without"
+                     "control codes, specifically ASCII values 32-126 decimal"
+                     "or 0x20-0x7E hexadecimal.",
                     cause="Invalid characters in the vault name.",
                     code="VaultDescriptionError")
 
@@ -355,15 +357,16 @@ or 0x20-0x7E hexadecimal.""",
         self.logger.debug('Checking a %s.'% id_type)
         if len(amazon_id) <> length[id_type]:
             raise InputException(
-                'A %s must be %s characters long. This ID is %s characters.'% (id_type, length[id_type], len(amazon_id)),
-                cause='Incorrect length of the %s string.'% id_type,
+                "A %s must be %s characters long. This ID is %s characters."%
+                        (id_type, length[id_type], len(amazon_id)),
                 code="IdError")
 
         m = re.match(self.ID_ALLOWED_CHARACTERS, amazon_id)
         if (m.end() if m else 0) != len(amazon_id):
             raise InputException(
-                u"""This %s contains invalid characters. \
-Allowed characters are a-z, A-Z, 0-9, '_' (underscore) and '-' (hyphen)"""% id_type,
+                "This %s contains invalid characters. "
+                "Allowed characters are a-z, A-Z, 0-9, "
+                "'_' (underscore) and '-' (hyphen)"% id_type,
                 cause='Illegal characters in the %s string.'% id_type,
                 code="IdError")
 
@@ -826,6 +829,8 @@ using %s MB parts to upload."% part_size)
 
         :param vault_name: Name of the vault.
         :type vault_name: str
+        :param limit: Maximal count of returned multipart uploads
+        :type limit: int
 
         :return: list of uploads, or None.
 
@@ -839,7 +844,7 @@ using %s MB parts to upload."% part_size)
                   {...}]
 
         :rtype: list
-        :raises: :py:exc:`glacier.glacierexception.CommunicationException`
+        :raises: :py:exc:`glacier.glacierexception.ResponseException`
         """
 
         self._check_vault_name(vault_name)
@@ -1247,16 +1252,18 @@ using %s MB parts to upload."% part_size)
                 download_job = job
                 if not job['Completed']:
                     raise CommunicationException(
-                        "Archive retrieval request not completed yet. Please try again later.",
+                        "Archive retrieval request not completed yet. "
+                        "Please try again later.",
                         code='NotReady')
-                self.logger.debug('Archive retrieval completed; archive is available for download now.')
+                self.logger.debug("Archive retrieval completed; "
+                                  "archive is available for download now.")
                 break
 
         else:
             raise InputException(
-                "Requested archive not available. Please make sure \
-your archive ID is correct, and start a retrieval job using \
-'getarchive' if necessary.",
+                "Requested archive not available. Please make sure "
+                "your archive ID is correct, and start a retrieval job using "
+                "'getarchive' if necessary.",
                 code='IdError')
 
         # Check whether we can access the file the archive has to be written to.
@@ -1264,7 +1271,8 @@ your archive ID is correct, and start a retrieval job using \
         if out_file_name:
             if os.path.isfile(out_file_name) and not overwrite:
                 raise InputException(
-                    "File exists already, aborting. Use the overwrite flag to overwrite existing file.",
+                    "File exists already, aborting. Use the overwrite flag to "
+                    "overwrite existing file.",
                     code="FileError")
             try:
                 out_file = open(out_file_name, 'w')

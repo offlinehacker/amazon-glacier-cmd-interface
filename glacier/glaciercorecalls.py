@@ -4,10 +4,10 @@
 .. module:: botocorecalls
    :platform: Unix, Windows
    :synopsis: boto calls to access Amazon Glacier.
-   
+
 This depends on the boto library, use version 2.6.0 or newer.
 
-     
+
      writer = GlacierWriter(glacierconn, GLACIER_VAULT)
      writer.write(block of data)
      writer.close()
@@ -47,6 +47,7 @@ def tree_hash(fo):
     together adjacent hashes until it ends up with one big one. So a
     tree of hashes.
     """
+
     hashes = []
     hashes.extend(fo)
     while len(hashes) > 1:
@@ -81,7 +82,6 @@ class GlacierWriter(object):
         self.part_size = part_size_in_bytes
         self.vault_name = vault_name
         self.connection = connection
-##        self.location = None
         self.logger = logger
 
         if uploadid:
@@ -98,7 +98,7 @@ class GlacierWriter(object):
 ##        self.upload_url = response.getheader("location")
 
     def write(self, data):
-        
+
         if self.closed:
             raise CommunicationError(
                 "Tried to write to a GlacierWriter that is already closed.",
@@ -108,7 +108,7 @@ class GlacierWriter(object):
             raise InputException (
                 'Block of data provided must be equal to or smaller than the set block size.',
                 code='InternalError')
-        
+
         part_tree_hash = tree_hash(chunk_hashes(data))
         self.tree_hashes.append(part_tree_hash)
         headers = {
@@ -149,11 +149,11 @@ class GlacierWriter(object):
 ##                        resp['message'],
 ##                        cause='Timeout',
 ##                        code=resp['code'])
-##                        
+##
 ##                if self.logger:
 ##                    logger.warning(resp['message'])
 ##                    logger.warning('sleeping 300 seconds (5 minutes) before retrying.')
-##                    
+##
 ##                retries += 1
 ##                time.sleep(300)
 ##
@@ -168,10 +168,10 @@ class GlacierWriter(object):
         self.uploaded_size += len(data)
 
     def close(self):
-        
+
         if self.closed:
             return
-            
+
         # Complete the multiplart glacier upload
         response = self.connection.complete_multipart_upload(self.vault_name,
                                                              self.uploadid,

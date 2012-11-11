@@ -10,8 +10,6 @@ import sys
 import os
 import ConfigParser
 import argparse
-import re
-import locale
 import glob
 import csv
 import json
@@ -36,14 +34,14 @@ def output_headers(headers, output):
         for row in rows:
             if len(str(row[1])) < 100:
                 table.add_row(row)
-        
+
         print table
-        
+
     if output == 'csv':
         csvwriter = csv.writer(sys.stdout, quoting=csv.QUOTE_ALL)
         for row in rows:
             csvwriter.writerow(row)
-        
+
     if output == 'json':
         print json.dumps(headers)
 
@@ -74,16 +72,16 @@ def output_table(results, output, keys=None, sort_key=None):
 
         if sort_key:
             table.sortby = keys[sort_key] if keys else sort_key
-            
+
         print table
-        
+
     if output == 'csv':
         csvwriter = csv.writer(sys.stdout, quoting=csv.QUOTE_ALL)
         keys = results[0].keys()
         csvwriter.writerow(keys)
         for row in results:
             csvwriter.writerow([row[k] for k in keys])
-            
+
     if output == 'json':
         print json.dumps(results)
 
@@ -98,14 +96,14 @@ def output_msg(msg, output, success=True):
     """
     if output == 'print':
         print msg
-        
+
     if output == 'csv':
         csvwriter = csv.writer(sys.stdout, quoting=csv.QUOTE_ALL)
         csvwriter.writerow(msg)
-            
+
     if output == 'json':
         print json.dumps(msg)
-        
+
     if not success:
         sys.exit(125)
 
@@ -118,9 +116,9 @@ def size_fmt(num, decimals = 1):
     for x in ['bytes','KB','MB','GB']:
         if num < 1024.0:
             return fmt % (num, x)
-        
+
         num /= 1024.0
-        
+
     return fmt % (num, 'TB')
 
 def default_glacier_wrapper(args):
@@ -259,27 +257,31 @@ def download(args):
     if args.outfile:
         output_msg(response, args.output, success=True)
 
+# See if we got a bacula-style file set.
+# This is /path/to/vol001|vol002|vol003
+# TODO: Needs to be tested!
+def bacula_filename(filename):
+    if len(filename) > 1:
+        raise InputException(
+            'Bacula-style file name input can accept only one file name argument.')
+
+    fileset = filename[0].split('|')
+    if len(fileset) > 1:
+        dirname = os.path.dirname(fileset[0])
+        filename = [fileset[0]]
+        filename += [os.path.join(dirname, fileset[i]) for i in range(1, len(fileset))]
+
+
 @handle_errors
 def upload(args):
     """
     Upload a file or a set of files to a Glacier vault.
     """
 
-    # See if we got a bacula-style file set.
-    # This is /path/to/vol001|vol002|vol003
-    if args.bacula:
-        if len(args.filename) > 1:
-            raise InputException(
-                'Bacula-style file name input can accept only one file name argument.')
-        
-        fileset = args.filename[0].split('|')
-        if len(fileset) > 1:
-            dirname = os.path.dirname(fileset[0])
-            args.filename = [fileset[0]]
-            args.filename += [os.path.join(dirname, fileset[i]) for i in range(1, len(fileset))]
-
     glacier = default_glacier_wrapper(args)
     results = []
+
+    expand = lambda f: glob.glob(os.path.expanduser(f))
 
     # If we have one or more file names, they appear in a list.
     # Iterate over these file names; do path expansion and wildcard expansion
@@ -287,25 +289,19 @@ def upload(args):
     # If no file name given it's an empty list, and we expect the file to
     # be read over stdin.
     if args.filename:
-        for f in args.filename:
-    
-            # In case the shell does not expand wildcards, if any, do this here.
-            if f[0] == '~':
-                f = os.path.expanduser(f)
+        files= (expanded for expanded in expand(nonexpanded) for nonexpanded in args.filename)
+        if not files:
+            raise InputException(
+                "File name given for upload can not be found: %s." %f,
+                code='CommandError')
 
-            globbed = glob.glob(f)
-            if globbed:
-                for g in globbed:
-                    response = glacier.upload(args.vault, g, args.description, args.region, args.stdin,
-                                              args.name, args.partsize, args.uploadid, args.resume)
-                    results.append({"Uploaded file": g,
-                                    "Created archive with ID": response[0],
-                                    "Archive SHA256 tree hash": response[1]})
-            else:
-                raise InputException(
-                    "File name given for upload can not be found: %s."% f,
-                    code='CommandError')
-            
+        for f in files:
+            response = glacier.upload(args.vault, g, args.description, args.region, args.stdin,
+                                      args.name, args.partsize, args.uploadid, args.resume)
+            results.append({"Uploaded file": g,
+                            "Created archive with ID": response[0],
+                            "Archive SHA256 tree hash": response[1]})
+
     elif args.stdin:
 
         # No file name; using stdin.
@@ -316,20 +312,23 @@ def upload(args):
 
     else:
         raise InputException(
-            '''No input given. Either give a file name or file names
-on the command line, or use the --stdin switch and pipe
-in the data over stdin.''',
+            "No input given. Either give a file name or file names "
+            "on the command line, or use the --stdin switch and pipe "
+            "in the data over stdin.",
             cause='No file name and no stdin pipe.',
             code='CommandError')
-            
-    output_table(results, args.output) if len(results) > 1 \
-                          else output_headers(results[0], args.output)
+
+    if len(results) > 1 :
+        output_table(results, args.output)
+    else:
+        output_headers(results[0], args.output)
 
 @handle_errors
 def getarchive(args):
     """
     Initiate an archive retrieval job.
     """
+
     glacier = default_glacier_wrapper(args)
     status, job, jobid = glacier.getarchive(args.vault, args.archive)
     output_headers(job, args.output)
@@ -365,14 +364,14 @@ def inventory(args):
     if sys.stdout.isatty() and output == 'print':
         print 'Checking inventory, please wait.\r',
         sys.stdout.flush()
-        
+
     job, inventory = glacier.inventory(args.vault, args.refresh)
     if inventory:
         if sys.stdout.isatty() and output == 'print':
             print "Inventory of vault: %s" % (inventory["VaultARN"],)
             print "Inventory Date: %s\n" % (inventory['InventoryDate'],)
             print "Content:"
-            
+
         headers = {'ArchiveDescription': 'Archive Description',
                    'CreationDate': 'Uploaded',
                    'Size': 'Size',
@@ -405,7 +404,7 @@ def treehash(args):
             # In case the shell does not expand wildcards, if any, do this here.
             if f[0] == '~':
                 f = os.path.expanduser(f)
-                
+
             globbed = glob.glob(f)
             if globbed:
                 for g in globbed:
@@ -524,7 +523,7 @@ def main():
         help='The vault to be created.')
     parser_mkvault.set_defaults(func=mkvault)
 
-    # glacier-cmd lsvault    
+    # glacier-cmd lsvault
     parser_lsvault = subparsers.add_parser("lsvault",
         help="List available vaults.")
     parser_lsvault.set_defaults(func=lsvault)
@@ -542,7 +541,7 @@ def main():
     parser_rmvault.add_argument('vault',
         help='The vault to be removed.')
     parser_rmvault.set_defaults(func=rmvault)
-    
+
     # glacier-cmd upload <vault> <filename> [--description <description>] [--name <store file name>] [--partsize <part size>]
     # glacier-cmd upload <vault> --stdin [--description <description>] [--name <store file name>] [--partsize <part size>]
     parser_upload = subparsers.add_parser('upload',
@@ -557,12 +556,12 @@ The name(s) of the local file(s) to be uploaded. Wildcards
 are accepted. Can not be used if --stdin is used.''')
     parser_upload.add_argument('--stdin', action='store_true',
         help='''\
-Read data from stdin, instead of local file. 
+Read data from stdin, instead of local file.
 Can not be used if <filename> is given.''')
     parser_upload.add_argument('--name', default=None,
         help='''\
-Use the given name as the filename for bookkeeping 
-purposes. To be used in conjunction with --stdin or 
+Use the given name as the filename for bookkeeping
+purposes. To be used in conjunction with --stdin or
 when the file being uploaded is a temporary file.''')
     parser_upload.add_argument('--partsize', type=int, default=-1,
         help='''\
@@ -744,9 +743,9 @@ at hand.''')
 
     # Process the remaining arguments.
     args = parser.parse_args(remaining_argv)
-    
+
     args.logtostdout = logtostdout
-    
+
     # Run the subcommand.
     args.func(args)
 

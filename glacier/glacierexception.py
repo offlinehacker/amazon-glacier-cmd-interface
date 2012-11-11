@@ -30,7 +30,7 @@ class GlacierException(Exception):
     ERRORCODE = {'InternalError': 127,        # Library internal error.
                  'UndefinedErrorCode': 126,   # Undefined code.
                  'NoResults': 125,            # Operation yielded no results.
-                 'GlacierConnectionError': 1, # Can not connect to Glacier. 
+                 'GlacierConnectionError': 1, # Can not connect to Glacier.
                  'SdbConnectionError': 2,     # Can not connect to SimpleDB.
                  'CommandError': 3,           # Command line is invalid.
                  'VaultNameError': 4,         # Invalid vault name.
@@ -38,14 +38,15 @@ class GlacierException(Exception):
                  'IdError': 6,                # Invalid upload/archive/job ID given.
                  'RegionError': 7,            # Invalid region given.
                  'FileError': 8,              # Error related to reading/writing a file.
-                 'ResumeError': 9,            # Problem resuming a multipart upload.
-                 'NotReady': 10,              # Requested download is not ready yet.
-                 'BookkeepingError': 11,      # Bookkeeping not available.
-                 'SdbCommunicationError': 12, # Problem reading/writing SimpleDB data.
-                 'ResourceNotFoundException': 13, # Glacier can not find the requested resource.
-                 'InvalidParameterValueException': 14, # Parameter not accepted.
-                 'DownloadError': 15 }        # Downloading an archive failed.
-                 
+                 'MemoryError': 9,            # Error with memory
+                 'ResumeError': 10,           # Problem resuming a multipart upload.
+                 'NotReady': 11,              # Requested download is not ready yet.
+                 'BookkeepingError': 12,      # Bookkeeping not available.
+                 'SdbCommunicationError': 13, # Problem reading/writing SimpleDB data.
+                 'ResourceNotFoundException': 14, # Glacier can not find the requested resource.
+                 'InvalidParameterValueException': 15, # Parameter not accepted.
+                 'DownloadError': 16 }        # Downloading an archive failed.
+
     def __init__(self, message, code=None, cause=None):
         """
         Constructor. Logs the error.
@@ -76,7 +77,7 @@ class GlacierException(Exception):
                 traceback.format_tb(sys.exc_info()[2]))
             # ^^^ let's hope the information is still there; caller must take
             #     care of this.
-            
+
         self.message = message
         self.logger.info(self.fetch(message=True))
         self.logger.debug(self.fetch(stack=True))
@@ -104,18 +105,18 @@ class GlacierException(Exception):
                             ellipsed,
                             "" if ellipsed == 1 else "s")
                         ellipsed = False  # marker for "given out"
-                        
+
                     yield line
 
         if message:
             exc = self if self.message is None else self.message
             for line in traceback.format_exception_only(exc.__class__, exc):
                 yield line
-                
+
             if self.cause:
                 yield ("Caused by: %d exception%s\n" %
                     (len(self.cause), "" if len(self.cause) == 1 else "s"))
-                
+
                 for causePart in self.cause:
                     if hasattr(causePart,"causeTree"):
                         for line in causePart.causeTree(indentation, self.stack):
@@ -132,7 +133,7 @@ to get output when calling this function.\n')
         """
         Writes the error details to sys.stderr or a stream.
         """
-        
+
         stream = sys.stderr if stream is None else stream
         for line in self.causeTree(indentation, message=message, stack=stack):
             stream.write(line)
@@ -152,7 +153,7 @@ class InputException(GlacierException):
     Exception that is raised when there is someting wrong with the
     user input.
     """
-    
+
     VaultNameError = 1
     VaultDescriptionError = 2
     def __init__(self, message, code=None, cause=None):
@@ -161,7 +162,7 @@ class InputException(GlacierException):
         :param message: the error message.
         :type message: str
         :param code: the error code.
-        :type code: 
+        :type code:
         :param cause: explanation on what caused the error.
         :type cause: str
         """
@@ -172,7 +173,7 @@ class ConnectionException(GlacierException):
     Exception that is raised when there is something wrong with
     the connection.
     """
-    
+
     GlacierConnectionError = 1
     SdbConnectionError = 2
     def __init__(self, message, code=None, cause=None):
@@ -181,7 +182,7 @@ class ConnectionException(GlacierException):
         :param message: the error message.
         :type message: str
         :param code: the error code.
-        :type code: 
+        :type code:
         :param cause: explanation on what caused the error.
         :type cause: str
         """
@@ -198,7 +199,7 @@ class CommunicationException(GlacierException):
         :param message: the error message.
         :type message: str
         :param code: the error code.
-        :type code: 
+        :type code:
         :param cause: explanation on what caused the error.
         :type cause: str
         """
