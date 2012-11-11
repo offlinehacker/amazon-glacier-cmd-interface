@@ -29,6 +29,7 @@ from dateutil.parser import parse as dtparse
 from datetime import datetime
 from pprint import pformat
 
+form glaciercorecalls import find
 from glaciercorecalls import GlacierConnection, GlacierWriter
 
 from glacierexception import *
@@ -394,67 +395,6 @@ class GlacierWrapper(object):
 
         return True
 
-    def _check_part_size(self, part_size, total_size):
-        """
-        Check the part size:
-
-        - check whether we have a part size, if not: use default.
-        - check whether part size is a power of two: if not,
-            increase until it is.
-        - check wehther part size is big enough for the archive
-            total size: if not, increase until it is.
-
-        Return part size to use.
-        """
-        def _part_size_for_total_size(total_size):
-            return self._next_power_of_2(
-                int(math.ceil(
-                        float(total_size) / (1024 * 1024 * self.MAX_PARTS)
-                )))
-
-        if part_size < 0:
-            if total_size > 0:
-                part_size = _part_size_for_total_size(total_size)
-            else:
-                part_size = GlacierWriter.DEFAULT_PART_SIZE
-        else:
-            ps = self._next_power_of_2(part_size)
-            if not ps == part_size:
-                self.logger.warning('Part size in MB must be a power of 2, \
-e.g. 1, 2, 4, 8 MB; automatically increased part size from %s to %s.'% (part_size, ps))
-
-            part_size = ps
-
-        # Check whether user specified value is big enough, and adjust if needed.
-        if total_size > part_size*1024*1024*self.MAX_PARTS:
-            part_size = _part_size_for_total_size(total_size)
-            self.logger.warning("Part size given is too small; \
-using %s MB parts to upload."% part_size)
-
-        return part_size
-
-    def _next_power_of_2(self, v):
-        """
-        Returns the next power of 2, or the argument if it's
-        already a power of 2.
-
-        :param v: the value to be tested.
-        :type v: int
-
-        :returns: the next power of 2.
-        :rtype: int
-        """
-
-        if v == 0:
-            return 1
-
-        v -= 1
-        v |= v >> 1
-        v |= v >> 2
-        v |= v >> 4
-        v |= v >> 8
-        v |= v >> 16
-        return v + 1
 
     def _bold(self, msg):
         """
@@ -871,6 +811,206 @@ using %s MB parts to upload."% part_size)
         return uploads
 
     @glacier_connect
+    @log_class_call("Listing uploaded parts.",
+                    "Listing uploaded parts successfull.")
+    def list_uploaded_parts(self, vault_name, upload_id, limit=None):
+        """
+        Lists already uploaded parts
+
+        :param vault_name: Name of the vault
+        :type vault_name: str
+        :param upload_id: Id of upload
+        :type upload_id: str
+        :param limit: Maximal count of returned parts
+        :type limit: int
+
+        :returns: List of uploaded parts or None
+
+            .. code-block:: python
+
+                {
+                    "ArchiveDescription" : "archive description",
+                    "CreationDate" : "2012-03-20T17:03:43.221Z",
+                    "MultipartUploadId" : "OW2fM5iVylEpFEMM9_HpKowRapC3vn5sSL39_396UW9zLFUWVrnRHaPjUJddQ5OxSHVXjYtrN47NBZ-khxOjyEXAMPLE",
+                    "PartSizeInBytes" : 4194304,
+                    "Parts" :
+                    [{
+                    "RangeInBytes" : "0-4194303",
+                    "SHA256TreeHash" : "01d34dabf7be316472c93b1ef80721f5d4"
+                    },
+                    {
+                    "RangeInBytes" : "4194304-8388607",
+                    "SHA256TreeHash" : "0195875365afda349fc21c84c099987164"
+                    }],
+                    "VaultARN" : "arn:aws:glacier:us-east-1:012345678901:vaults/demo1-vault"
+                }
+
+        :rtype: json
+
+        :raises: :py:exc:`glacier.glacierexception.ResponseException`
+        """
+        self._check_vault_name(vault_name)
+
+        try:
+            uploads = self.listmultiparts(vault_name)
+        except ResponseException as e:
+            self.logger.exception("Failed to get a list of uploaded parts "
+                                  "for interrupted upload %s" %upload_id)
+            raise
+
+        upload = find(lambda upload: upload_id==upload['MultipartUploadId'], uploads)
+        if not upload:
+            self.logger.info("Requested upload id %s not found" %upload_id)
+            return None
+
+        self.logger.info("Found a matching upload id: %s" %upload_id)
+        self.logger.debug(upload)
+
+        # Collect all of the pages of already uploaded parts
+        uploaded_parts = []
+        marker = None
+        list_parts_response = None
+        while True:
+            # Fetch a list of already uploaded parts and their SHA hashes.
+            try:
+                response = self.glacierconn.list_parts(self.vault_name,
+                                                        self.uploadid,
+                                                        marker=marker)
+            except boto.glacier.exceptions.UnexpectedHTTPResponseError as e:
+                raise ResponseException(
+                    "Failed to get a list already uploaded parts for "
+                    "interrupted upload %s." %uploadid,
+                    cause=self._decode_error_message(e.body),
+                    code=e.code)
+
+            list_parts_response = response.copy()
+
+            # Split and sort parts
+            uploaded_parts += list_parts_response['Parts']
+
+            if limit and len(uploaded_parts) >= limit:
+                uploaded_parts = uploaded_parts[:limit]
+                break
+
+            # If a marker is present, this means there are more pages
+            # of parts available. If no marker, we have the last page.
+            marker = list_parts_response['Marker']
+            if not marker:
+                break
+
+        if not list_parts_response:
+            raise ResponseException(
+                "No response for list of uploaded parts for upload id %s" %upload_id,
+                code='InternalError')
+
+        # Make similar response, except filtering out marker
+        list_parts_response["Parts"] = uploaded_parts
+        del list_parts_response["Marker"]
+
+        return list_parts_response
+
+    def _upload(f, vault_name, upload_id, part_size, thread_count, dont_mmap=False):
+        # List and wrap uploaded parts
+        uploaded_parts = upload_id and list_uploaded_parts(vault_name, upload_id)
+        uploaded_parts_list = []
+
+        # If some parts are already uploaded
+        if uploaded_parts:
+            # Wrap uploaded parts
+            uploaded_parts_list += (
+                map(lambda part: Part(part, dont_mmap=dont_mmap), uploaded_parts["Parts"])
+            )
+
+            # Correct part size
+            if part_size != uploaded_parts["PartSizeInBytes"]):
+                self.logger.warning("Uploaded parts size %d from previous upload"
+                                    "is different as requested %d part size. "
+                                    "Chaning part size to one from previous upload!"
+                                    %(uploaded_parts["PartSizeInBytes"], part_size))
+                part_size = uploaded_parts["PartSizeInBytes"]
+
+        # Else initiate new multipart upload
+        else:
+            try:
+                response = self.glacierconn.initiate_multipart_upload(
+                    vault_name, part_size, description
+                )
+            except boto.glacier.exceptions.UnexpectedHTTPResponseError as e:
+                raise ResponseException(
+                    "Failed to initiate multipart upload for file %s"
+                    %f.name,
+                    cause=self._decode_error_message(e.body),
+                    code=e.code)
+
+            self.upload_id = response["UploadId"]
+
+        # We can't upload using multiple threads if file descriptor is sequential
+        if is_sequential(f):
+            self.logger.warning("We can't upload using multiple threads if"
+                                "file descriptor is sequential.")
+            threads = 1
+
+        # Helper function that creates new part wrapper
+        mkpart = lambda start: Part({
+            "RangeInBytes": "%d-%d" %(start, start+part_size)
+        }, dont_mmap = dont_mmap)
+        # Helper function that gets part in already uploaded parts
+        part_in_uploaded = lambda start: find(lambda part: part.start==start,
+                                              uploaded_parts_list)
+
+
+        # Params for part uploader, multiprocessing does not allow usage of class
+        params = (self.glacierconn, vault_name, upload_id)
+        # Iterator mapping for preparing data for upload_part_map function
+        part_imap = imap(lambda start: {"params": params,
+                                        "part": (part_in_uploaded(start)
+                                                    or mkpart(start)
+                                                )
+                                        })
+
+        # Just a simple wrapper function to work with upload_part
+        def upload_part_wrapper(data):
+            glacierconn, vault_name, upload_id = data['params']
+            part = data['part']
+
+            return upload_part(glacierconn, vault_name, upload_id, part)
+
+
+        iter_method = imap
+        pool = None
+        if thread_count > 1:
+            # Create new pool for uploading parts in parallel
+            pool = Pool(thread_count)
+            iter_method = pool.imap
+
+        processed_part_iter = iter_method(upload_part_wrapper,
+                                          part_imap(
+                                              count(step=self.part_size)
+                                          ))
+
+        # Handle uploaded parts
+        processed_parts = []
+        while True:
+            try:
+                # We don't handle timeouts here, because it is very critical if
+                # subprocess doesn't return, so make shure upload_part_map
+                # doesn't block uncontroled like ever!
+                processed_part = processed_part_iter.next()
+                if isinstance(processed_part, Exception):
+                    raise processed_part
+            except EOFError as e:
+                self.logger.debug("Whole file %s processed by imap, "
+                                  "break upload loop" %f.name)
+                break
+
+            # We have to create a new list, because changes made
+            # in subprocesses don't propagate here
+            processed_parts.append(processed_part)
+
+        if pool:
+            pool.close()
+
+    @glacier_connect
     @sdb_connect
     @log_class_call("Uploading archive.",
                     "Upload of archive finished.")
@@ -917,14 +1057,13 @@ using %s MB parts to upload."% part_size)
 
         if resume and stdin:
             raise InputException(
-                'You must provide the UploadId to resume upload of streams from stdin.\nUse glacier-cmd listmultiparts <vault> to find the UploadId.',
+                "You must provide the UploadId to resume upload of streams from"
+                "stdin. Use glacier-cmd listmultiparts <vault> to find the UploadId.",
                 code='CommandError')
 
         # If file_name is given, try to use this file(s).
         # Otherwise try to read data from stdin.
         total_size = 0
-        reader = None
-        mmapped_file = None
         if not stdin:
             if not file_name:
                 raise InputException(
@@ -933,7 +1072,6 @@ using %s MB parts to upload."% part_size)
 
             try:
                 f = open(file_name, 'rb')
-                mmapped_file = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
                 total_size = os.path.getsize(file_name)
             except IOError as e:
                 raise InputException(
@@ -942,20 +1080,22 @@ using %s MB parts to upload."% part_size)
                     code='FileError')
 
         elif select.select([sys.stdin,],[],[],0.0)[0]:
-            reader = sys.stdin
             total_size = 0
         else:
-            raise InputException(
-                "There is nothing to upload.",
-                code='CommandError')
+            raise InputException("There is nothing to upload.", code='CommandError')
 
         # Log the kind of upload we're going to do.
         if uploadid:
-            self.logger.info('Attempting resumption of upload of %s to %s.'% (file_name if file_name else 'data from stdin', vault_name))
+            self.logger.info('Attempting resumption of upload of %s to %s.'%
+                             (file_name if file_name else 'data from stdin',
+                              vault_name))
         elif resume:
-            self.logger.info('Attempting resumption of upload of %s to %s.'% (file_name, vault_name))
+            self.logger.info('Attempting resumption of upload of %s to %s.'%
+                             (file_name, vault_name))
         else:
-            self.logger.info('Starting upload of %s to %s.\nDescription: %s'% (file_name if file_name else 'data from stdin', vault_name, description))
+            self.logger.info('Starting upload of %s to %s.\nDescription: %s'%
+                             (file_name if file_name else 'data from stdin',
+                              vault_name, description))
 
         # If user did not specify part_size, compute the optimal (i.e. lowest
         # value to stay within the self.MAX_PARTS (10,000) block limit).
@@ -970,34 +1110,56 @@ using %s MB parts to upload."% part_size)
             uploads = self.listmultiparts(vault_name)
             for upload in uploads:
                 if uploadid == upload['MultipartUploadId']:
-                    self.logger.debug('Found a matching upload id. Continuing upload resumption attempt.')
+                    self.logger.info("Found a matching upload id. "
+                                     "Continuing upload resumption attempt.")
                     self.logger.debug(upload)
                     part_size_in_bytes = upload['PartSizeInBytes']
                     break
             else:
                 raise InputException(
-                    'Can not resume upload of this data as no existing job with this uploadid could be found.',
+                    "Can not resume upload of this data as no existing job with "
+                    "this uploadid could be found.",
                     code='IdError')
 
         # Initialise the writer task.
-        writer = GlacierWriter(self.glacierconn, vault_name, description=description,
-                               part_size_in_bytes=part_size_in_bytes, uploadid=uploadid, logger=self.logger)
+        writer = GlacierWriter(self.glacierconn, vault_name,
+                               description=description,
+                               part_size_in_bytes=part_size_in_bytes,
+                               uploadid=uploadid,
+                               logger=self.logger)
+
 
         if upload:
+            parts= []
             marker = None
+
+            # Splits range in two parts
+            offsets = lambda part:  part['RangeInBytes'].split('-')[0]
+
+            # First collect all of the pages
             while True:
 
                 # Fetch a list of already uploaded parts and their SHA hashes.
                 try:
-                    response = self.glacierconn.list_parts(vault_name, uploadid, marker=marker)
+                    response = self.glacierconn.list_parts(vault_name, uploadid,
+                                                           marker=marker)
                 except boto.glacier.exceptions.UnexpectedHTTPResponseError as e:
                     raise ResponseException(
-                        'Failed to get a list already uploaded parts for interrupted upload %s.'% uploadid,
+                        "Failed to get a list already uploaded parts for"
+                        "interrupted upload %s."% uploadid,
                         cause=self._decode_error_message(e.body),
                         code=e.code)
 
                 list_parts_response = response.copy()
-                current_position = 0
+
+                # Split and sort parts
+                parts += list_parts_response['Parts']
+
+                # If a marker is present, this means there are more pages
+                # of parts available. If no marker, we have the last page.
+                marker = list_parts_response['Marker']
+                if not marker:
+                    break
 
                 # Process the parts list.
                 # For each part of data, take the matching data range from
@@ -1005,54 +1167,31 @@ using %s MB parts to upload."% part_size)
                 # If recieving data over stdin, the parts must be sequential
                 # and the first must start at 0. For file, we can use the seek()
                 # function to handle non-sequential parts.
-                for part in list_parts_response['Parts']:
-                    start, stop = (int(p) for p in part['RangeInBytes'].split('-'))
-                    print 'start: %s, current position: %s'% (start, current_position)
-                    if not start == current_position:
-                        if stdin:
-                            raise InputException(
-                                'Cannot verify non-sequential upload data from stdin.',
-                                code='ResumeError')
-                        if reader:
-                            reader.seek(start)
-
-                    if mmapped_file and stop > len(mmapped_file):
+                for start, stop in parts:
+                    print 'start: %s, current position: %s' %(start, current_position)
+                    if (not start == current_position) and stdin:
                         raise InputException(
-                            'File does not match uploaded data; please check your uploadid and try again.',
+                            'Cannot verify non-sequential upload data from stdin.',
+                            code='ResumeError')
+
+                    if stop > len(total_size):
+                        raise InputException(
+                            "File does not match uploaded data; "
+                            "please check your uploadid and try again.",
                             cause='File is smaller than uploaded data.',
                             code='ResumeError')
 
-                    # Try to read the chunk of data, and take the hash if we
-                    # have received anything.
-                    # If no data or hash mismatch, stop checking raise an
-                    # exception.
-                    data = None
-                    data = reader.read(stop-start) if reader else mmapped_file[start:stop]
-                    if data:
-                        data_hash = glaciercorecalls.tree_hash(glaciercorecalls.chunk_hashes(data))
-                        if glaciercorecalls.bytes_to_hex(data_hash) == part['SHA256TreeHash']:
-                            self.logger.debug('Part %s hash matches.'% part['RangeInBytes'])
-                            writer.tree_hashes.append(data_hash)
-                        else:
-                            raise InputException(
-                                'Received data does not match uploaded data; please check your uploadid and try again.',
-                                cause='SHA256 hash mismatch.',
-                                code='ResumeError')
 
-                    else:
-                        raise InputException(
-                            'Received data does not match uploaded data; please check your uploadid and try again.',
-                            cause='No or not enough data to match.',
-                            code='ResumeError')
+                    # check!
+
+
+                    self.logger.debug('Part %s hash matches.'% part['RangeInBytes'])
+                    writer.tree_hashes.append(data_hash)
 
                     current_position += stop - start
 
-                # If a marker is present, this means there are more pages
-                # of parts available. If no marker, we have the last page.
-                marker = list_parts_response['Marker']
                 writer.uploaded_size = stop
-                if not marker:
-                    break
+
 
                 if total_size > 0:
                     msg = 'Checked %s of %s (%s%%).' \
@@ -1083,13 +1222,10 @@ using %s MB parts to upload."% part_size)
         start_time = current_time = previous_time = time.time()
         start_bytes = writer.uploaded_size
         while True:
-            if reader:
-                part = reader.read(part_size_in_bytes)
+            if total_size > writer.uploaded_size+part_size_in_bytes:
+                part = mmapped_file[writer.uploaded_size:writer.uploaded_size+part_size_in_bytes]
             else:
-                if len(mmapped_file) > writer.uploaded_size+part_size_in_bytes:
-                    part = mmapped_file[writer.uploaded_size:writer.uploaded_size+part_size_in_bytes]
-                else:
-                    part = mmapped_file[writer.uploaded_size:]
+                part = mmapped_file[writer.uploaded_size:]
 
             if not part:
                 break
