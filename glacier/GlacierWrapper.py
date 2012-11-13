@@ -909,16 +909,19 @@ class GlacierWrapper(object):
 
         return list_parts_response
 
-    def _upload(f, vault_name, upload_id, part_size, thread_count, dont_mmap=False):
+    def _upload(f, vault_name, upload_id, part_size, thread_count,
+                dont_mmap=False, retries=1):
         # List and wrap uploaded parts
         uploaded_parts = upload_id and list_uploaded_parts(vault_name, upload_id)
         uploaded_parts_list = []
+        sequential = False
 
         # If some parts are already uploaded
         if uploaded_parts:
             # Wrap uploaded parts
             uploaded_parts_list += (
-                map(lambda part: Part(part, dont_mmap=dont_mmap), uploaded_parts["Parts"])
+                map(lambda part: Part(part, dont_mmap=dont_mmap),
+                    uploaded_parts["Parts"])
             )
 
             # Correct part size
@@ -938,7 +941,7 @@ class GlacierWrapper(object):
             except boto.glacier.exceptions.UnexpectedHTTPResponseError as e:
                 raise ResponseException(
                     "Failed to initiate multipart upload for file %s"
-                    %f.name,
+                    %f,
                     cause=self._decode_error_message(e.body),
                     code=e.code)
 
@@ -946,8 +949,10 @@ class GlacierWrapper(object):
 
         # We can't upload using multiple threads if file descriptor is sequential
         if is_sequential(f):
-            self.logger.warning("We can't upload using multiple threads if"
-                                "file descriptor is sequential.")
+            sequential = True
+            threads>1 and self.logger.warning("We can't upload using multiple "
+                                              "threads if file descriptor %f is "
+                                              "sequential." %f)
             threads = 1
 
         # Helper function that creates new part wrapper
@@ -955,7 +960,7 @@ class GlacierWrapper(object):
             "RangeInBytes": "%d-%d" %(start, start+part_size)
         }, dont_mmap = dont_mmap)
         # Helper function that gets part in already uploaded parts
-        part_in_uploaded = lambda start: find(lambda part: part.start==start,
+        part_in_uploaded = lambda start: find(lambda part: part.start == start,
                                               uploaded_parts_list)
 
 
@@ -968,7 +973,7 @@ class GlacierWrapper(object):
                                                 )
                                         })
 
-        # Just a simple wrapper function to work with upload_part
+        # Just a simple wrapper function to work with python map
         def upload_part_wrapper(data):
             glacierconn, vault_name, upload_id = data['params']
             part = data['part']
@@ -983,32 +988,93 @@ class GlacierWrapper(object):
             pool = Pool(thread_count)
             iter_method = pool.imap
 
+        self.logger.info("Starting uploading file %s" %f)
         processed_part_iter = iter_method(upload_part_wrapper,
                                           part_imap(
                                               count(step=self.part_size)
                                           ))
 
-        # Handle uploaded parts
-        processed_parts = []
-        while True:
-            try:
-                # We don't handle timeouts here, because it is very critical if
-                # subprocess doesn't return, so make shure upload_part_map
-                # doesn't block uncontroled like ever!
-                processed_part = processed_part_iter.next()
-                if isinstance(processed_part, Exception):
-                    raise processed_part
-            except EOFError as e:
-                self.logger.debug("Whole file %s processed by imap, "
-                                  "break upload loop" %f.name)
-                break
+        # Support for multiple retries
+        for x in range(1,retries+1):
+            self.logger.info("Upload retry %d for file %s" %(x, f))
 
-            # We have to create a new list, because changes made
-            # in subprocesses don't propagate here
-            processed_parts.append(processed_part)
+            # Main upload function
+            processed_parts = []
+            failed_parts = []
+            while True:
+                try:
+                    # We don't handle timeouts here, because it is very critical if
+                    # subprocess doesn't return, so make sure upload_part_map
+                    # doesn't block uncontroled like ever!
+                    processed_part = processed_part_iter.next()
+                    if isinstance(processed_part, Exception):
+                        self.logger.exception("Error uploading part %s, "
+                                              "will retry later" %e.data)
+                        failed_parts.append(part)
+                        raise processed_part
+
+                except EOFError as e:
+                    self.logger.debug("Whole file %s processed, "
+                                      "break upload loop" %f.name)
+                    break
+
+                except InputException as e:
+                    if e.code == GlacierException.ERRORCODE["FileError"]:
+                        self.logger.exception("File error on part %s" %e.data)
+
+                    elif e.code == GlacierException.ERRORCODE["MemoryError"]:
+                        self.logger.exception("Memory error on part %s" %e.data)
+
+                    elif e.code == GlacierException.ERRORCODE['InternalError']:
+                        self.logger.exception("InternalError detected on part %s, "
+                                              "aborting" %e.data)
+
+                        sequential and [part.emptyBuffer() for part in failed_parts]
+                        pool and pool.terminate()
+                        raise e
+                    else:
+                        self.logger.exception("Unknown input error on part %s" %e.data)
+
+                    if len(failed_parts) >= self.max_errors or sequential:
+                        self.logger.error("Too many errors uploading file %s, "
+                                          "givin up" %f)
+
+                        sequential and [part.emptyBuffer() for part in failed_parts]
+                        pool and pool.terminate()
+                        raise e
+
+                except CommunicationException as e:
+                    self.logger.exception("Communication error on part %s" %e.data)
+
+                    if len(failed_parts) >= self.max_errors:
+                        self.logger.error("Too many errors uploading file %s, "
+                                          "givin up" %f)
+
+                        sequential and [part.emptyBuffer() for part in failed_parts]
+                        pool and pool.terminate()
+                        raise e
+
+                except Exception as e:
+                    sequential and [part.emptyBuffer() for part in failed_parts]
+                    pool and pool.terminate()
+                    raise e
+
+                else:
+                    # We have to create a new list, because changes made
+                    # in subprocesses don't propagate here
+                    processed_parts.append(processed_part)
+
+            failed_parts and self.logger.warning("%d failed parts detected, f: %s"
+                                               %(len(failed_parts), f))
+
+            if x<retries:
+                failed_parts and self.logger.debug("Re-uploading failed parts, f: %s" %f)
+                processed_part_iter = iter_method(upload_part_wrapper,
+                                                  failed_parts)
 
         if pool:
             pool.close()
+            pool.join()
 
     @glacier_connect
     @sdb_connect

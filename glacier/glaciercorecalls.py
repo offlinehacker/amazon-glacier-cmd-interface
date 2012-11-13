@@ -113,34 +113,48 @@ class Part(object):
         """
 
         if self.sequential:
-            if self.start<seqoffset:
+            if self.start < seqoffset:
                 msg = ("Sequential offset %d is already over part %s start"
                        %(seqoffset, self))
                 self.logger.exception(msg)
 
                 raise InputException(msg, code='FileError')
-            if seqoffset>=0 and self.start!=seqoffset:
+            if seqoffset >= 0 and self.start != seqoffset:
                 try:
-                    self.f.read(self.start-seqoffset)
+                    self.f.read(self.start-seqoffset-1)
+                    if not self.f.read(1):
+                        raise EOFError()
                 except IOError as e:
                     msg="Cannot read fd %s"  %self.f
-                    raise InputException(msg, code='FileError', cause=e)
+                    raise InputException(msg, code='FileError',
+                                         cause=e, data=self)
+                except EOFError as e:
+                    msg = ("End of stream for file %s detected "
+                           "before skipping the whole part" %self.f)
+                    self.logger.debug(msg)
+                    raise InputException(msg, code='InternalError',
+                                         cause=e, data=self)
                 except Exception as e:
                     msg="Cannot read fd %s"  %self.f
-                    raise InputException(msg, cause=e)
+                    raise InputException(msg, cause=e, data=self)
         else:
             try:
-                self.f.seek(start)
+                self.f.seek(start-1)
             except IOError as e:
-                if e.errno==errno.ESPIPE:
+                if e.errno == errno.ESPIPE:
                     msg = "Is your fd %s really non-sequential?" %self.f
-                    raise InputException(msg, code='FileError', cause=e)
+                    raise InputException(msg, code='InternalError',
+                                         cause=e, data=self)
                 else:
                     msg = "Problem seeking fd %s" %self.f
-                    raise InputException(msg, code='FileError', cause=e)
+                    raise InputException(msg, code='FileError', cause=e, data=self)
             except Exception as e:
                 msg = "Problem seeking fd %s" %self.f
-                raise InputException(msg, cause=e)
+                raise InputException(msg, cause=e, data=self)
+
+            # Ugly hack to detect if we are at the end of the file
+            if not f.read(1):
+                raise EOFError()
 
             try:
                 self.logger.debug("Reading part %s into memory" %self)
@@ -148,13 +162,13 @@ class Part(object):
                 self.logger.debug("Reading part succesfull")
             except MemoryError as e:
                 msg = "Cannot read part %s into memory" %self
-                raise InputException(msg, code='MemoryError', cause=e)
+                raise InputException(msg, code='MemoryError', cause=e, data=self)
             except IOError as e:
                 msg="Cannot read fd %s"  %self.f
-                raise InputException(msg, code='FileError', cause=e)
+                raise InputException(msg, code='FileError', cause=e, data=self)
             except Exception as e:
                 msg="Cannot read fd %s"  %self.f
-                raise InputException(msg, cause=e)
+                raise InputException(msg, cause=e, data=self)
 
             return buffer
 
@@ -168,11 +182,23 @@ class Part(object):
 
         if self.sequential:
             msg = "Sequential file descriptors cannot be mmaped, part %s" %self
-            raise InputException(msg, code='FileError')
+            raise InputException(msg, code='InternalError', data=self)
 
         if self.start%self.pagesize!=0:
             msg = "Part %s start is not multiple of mmap page size" %self
-            raise InputException(msg, code='MemoryError')
+            raise InputException(msg, code='MemoryError', data=self)
+
+
+        if self.start+1 > self.file_size:
+            self.logger.debug("EOF detected for file %s" %self.f)
+            raise EOFError()
+
+        # Files can grow while we are uploading so let's do that all the time
+        self.file_size = os.fstat(self.f.fileno()).st_size
+
+        # Correct read size if we are at the end
+        if (self.start+1-self.file_size) < self.size:
+            self.size = self.start+1-self.file_size
 
         try:
             self.logger.debug("Mmaping part %s" %self)
@@ -182,16 +208,20 @@ class Part(object):
                                prot=mmap.PROT_READ)
             self.mmap = buffer
             self.logger.debug("Mmaping part %s successfull" %self)
+        except ValueError as e:
+            msg = ("Problem with mmaping part %s, "
+                   "offset or size incorrect?" %self)
+            raise InputException(msg, code='InternalError', cause=e, data=self)
         except MemoryError as e:
             msg = ("Problems with mmaping part %s, "
                    "is your address space big enough?" %self)
-            raise InputException(msg, code='MemoryError', cause=e)
+            raise InputException(msg, code='MemoryError', cause=e, data=self)
         except Exception as e:
-            raise InputException("Problem mmaping part %s" %self, cause=e)
+            raise InputException("Problem mmaping part %s" %self, cause=e, data=self)
 
         return buffer
 
-    def getBuffer(self, f, seqoffset=-1, reopen=True):
+    def getBuffer(self, f, seqoffset=-1):
         """
         Buffers part into memory
 
@@ -343,21 +373,26 @@ class Part(object):
         """
         Constructor
 
-        :part part: Part descriptions to use
-        :type part: json
-        :param dont_mmap: Prevent mmaping non-sequential data stream
-        :type dont_mmap: boolean
-        :param reopen: Should we reopen file descriptor
-        :type reopen: boolean
-
         .. note::
 
             Mmapping will be automatically be disabled if there will be
             an error with mmaping, and fallback to reading to memory
             will be used.
 
+        .. warning::
+
+            Disable mmaping if your disk can cause problems. This
+            library will crash if disk is removed or data can't be read!
+
+        :part part: Part descriptions to use
+        :type part: json
+        :param dont_mmap: Prevent mmaping non-sequential data stream
+        :type dont_mmap: boolean
+        :param reopen: Should we reopen file descriptor
+        :type reopen: boolean
         :type dont_mmap: boolean
         """
+
         self.logger = logging.getLogger(self.__class__.__name__)
 
         if not part.get('RangeInBytes'):
@@ -380,72 +415,71 @@ def upload_part(glacierconn, vault_name, upload_id, uploaded_parts,
     logger = logging.getLogger(_upload_part.func_name)
 
     try:
+        logger.debug("Getting buffer for part %s" %part)
         part.getBuffer()
     except InputException as e:
         return e
+    # Make shure we don't crash here
+    except Exception as e:
+        return InputException("Unknown error while getting buffer "
+                              "for part %s" %part,
+                              code='InternalError',
+                              cause=e,
+                              data=part)
 
-    if part.verifyTreeHash():
-        return part
+    try:
+        logger.debug("Verifing tree hash for part %s" %part)
+        if part.verifyTreeHash():
+            logger.debug("Part %s already uploaded" %part)
+
+            part.emptyBuffer()
+            return part
+
+    except InputException as e:
+        not part.sequential and part.emptyBuffer()
+        return e
+    # Make shure we don't crash here
+    except Exception as e:
+        not part.sequential and part.emptyBuffer()
+        return InputException("Unknown error while verifing tree hash "
+                              "for part %s" %part,
+                              code='InternalError',
+                              cause=e,
+                              data=part)
+
+    logger.debug("Part %s verification incorrect" %part)
 
     # TODO: Add advanced exception handler
     try:
+        logger.debug("Uploading part %s; vault name %s, "
+                     "hash: %s, tree_hash: %s, start: %d, len: %"
+                     %(part, self.vault_name, upload_id, part.getHash(),
+                       part.getTreeHash(), part.start, len(part.getBuffer())))
         self.glacierconn.upload_part(vault_name,
                                 upload_id,
                                 part.getHash(),
                                 part.getTreeHash(),
                                 (part.start, part.start+len(part.getBuffer())-1),
                                 part.getBuffer())
+    # Make shure we don't crash here
     except Exception as e:
-        # Allow callback to handle exceptions
-        return e
+        not part.sequential and part.emptyBuffer()
+        return CommunicationException("Unknown error while uploading "
+                                      "part %s" %part,
+                                      cause=e,
+                                      data=part)
 
-    # Empty buffer so memory gets cleaned and file descriptors gets closed
-    part.emptyBuffer()
+    logger.debug("Part %s upload successfull" %part)
+
+    try:
+        # Empty buffer so memory gets cleaned and file descriptors gets closed
+        part.emptyBuffer()
+    except InputException as e:
+        return e
 
     return part
 
-
 DEFAULT_PART_SIZE = 128 # in MB, power of 2.
-
-def _get_part_size(self, part_size, total_size):
-    """
-    Gets the part size:
-
-    - check whether we have a part size, if not: use default.
-    - check whether part size is a power of two: if not,
-        increase until it is.
-    - check wehther part size is big enough for the archive
-        total size: if not, increase until it is.
-
-    Return part size to use.
-    """
-    def _part_size_for_total_size(total_size):
-        return self._next_power_of_2(
-            int(math.ceil(
-                    float(total_size) / (1024 * 1024 * self.MAX_PARTS)
-            )))
-
-    if part_size < 0:
-        if total_size > 0:
-            part_size = _part_size_for_total_size(total_size)
-        else:
-            part_size = GlacierWriter.DEFAULT_PART_SIZE
-    else:
-        ps = self._next_power_of_2(part_size)
-        if not ps == part_size:
-            self.logger.warning("Part size in MB must be a power of 2, "
-                                "e.g. 1, 2, 4, 8 MB; automatically increase "
-                                "part size from %s to %s."% (part_size, ps))
-
-        part_size = ps
-
-    # Check whether user specified value is big enough, and adjust if needed.
-    if total_size > part_size*1024*1024*self.MAX_PARTS:
-        part_size = _part_size_for_total_size(total_size)
-        self.logger.warning("Part size given is too small;"
-                            "using %s MB parts to upload."% part_size)
-
-    return part_size
 
 def _next_power_of_2(self, v):
     """
@@ -470,121 +504,35 @@ def _next_power_of_2(self, v):
     v |= v >> 16
     return v + 1
 
-    def __init__(self, connection, vault_name,
-                 description=None, part_size_in_bytes=DEFAULT_PART_SIZE*1024*1024,
-                 uploadid=None, logger=None):
+def _get_part_size(self, part_size, total_size):
+    """
+    Gets the part size:
 
-        self.part_size = part_size_in_bytes
-        self.vault_name = vault_name
-        self.connection = connection
-        self.logger = logger
+    - check whether we have a part size, if not: use default.
+    - check whether part size is a power of two: if not,
+        increase until it is.
+    - check wehther part size is big enough for the archive
+        total size: if not, increase until it is.
 
-        if uploadid:
-            self.uploadid = uploadid
+    Return part size to use.
+    """
+
+    def _part_size_for_total_size(total_size):
+        return self._next_power_of_2(
+            int(math.ceil(
+                    float(total_size) / (1024 * 1024 * self.MAX_PARTS)
+            )))
+
+    if part_size < 0:
+        if total_size > 0:
+            part_size = _part_size_for_total_size(total_size)
         else:
-            response = self.connection.initiate_multipart_upload(self.vault_name,
-                                                                 self.part_size,
-                                                                 description)
-            self.uploadid = response['UploadId']
+            part_size = DEFAULT_PART_SIZE
+    else:
+        part_size = self._next_power_of_2(part_size)
 
-        self.uploaded_size = 0
-        self.tree_hashes = []
-        self.closed = False
-##        self.upload_url = response.getheader("location")
+    # Check whether user specified value is big enough, and adjust if needed.
+    if total_size > part_size*1024*1024*self.MAX_PARTS:
+        part_size = _part_size_for_total_size(total_size)
 
-    def write(self, data):
-
-        if self.closed:
-            raise CommunicationError(
-                "Tried to write to a GlacierWriter that is already closed.",
-                code='InternalError')
-
-        if len(data) > self.part_size:
-            raise InputException (
-                'Block of data provided must be equal to or smaller than the set block size.',
-                code='InternalError')
-
-        part_tree_hash = tree_hash(chunk_hashes(data))
-        self.tree_hashes.append(part_tree_hash)
-        headers = {
-                   "x-amz-glacier-version": "2012-06-01",
-                    "Content-Range": "bytes %d-%d/*" % (self.uploaded_size,
-                                                       (self.uploaded_size+len(data))-1),
-                    "Content-Length": str(len(data)),
-                    "Content-Type": "application/octet-stream",
-                    "x-amz-sha256-tree-hash": bytes_to_hex(part_tree_hash),
-                    "x-amz-content-sha256": hashlib.sha256(data).hexdigest()
-                  }
-
-        self.connection.upload_part(self.vault_name,
-                                    self.uploadid,
-                                    hashlib.sha256(data).hexdigest(),
-                                    bytes_to_hex(part_tree_hash),
-                                    (self.uploaded_size, self.uploaded_size+len(data)-1),
-                                    data)
-
-##        retries = 0
-##        while True:
-##            response = self.connection.make_request(
-##                "PUT",
-##                self.upload_url,
-##                headers,
-##                data)
-##
-##            # Success.
-##            if response.status == 204:
-##                break
-##
-##            # Time-out recieved: sleep for 5 minutes and try again.
-##            # Do not try more than five times; after that it's over.
-##            elif response.status == 408:
-##                if retries >= 5:
-##                    resp = json.loads(response.read())
-##                    raise ResonseException(
-##                        resp['message'],
-##                        cause='Timeout',
-##                        code=resp['code'])
-##
-##                if self.logger:
-##                    logger.warning(resp['message'])
-##                    logger.warning('sleeping 300 seconds (5 minutes) before retrying.')
-##
-##                retries += 1
-##                time.sleep(300)
-##
-##            else:
-##                raise ResponseException(
-##                    "Multipart upload part expected response status 204 (got %s):\n%s"\
-##                        % (response.status, response.read()),
-##                    cause=resp['message'],
-##                    code=resp['code'])
-
-##        response.read()
-        self.uploaded_size += len(data)
-
-    def close(self):
-
-        if self.closed:
-            return
-
-        # Complete the multiplart glacier upload
-        response = self.connection.complete_multipart_upload(self.vault_name,
-                                                             self.uploadid,
-                                                             bytes_to_hex(tree_hash(self.tree_hashes)),
-                                                             self.uploaded_size)
-        self.archive_id = response['ArchiveId']
-        self.location = response['Location']
-        self.hash_sha256 = bytes_to_hex(tree_hash(self.tree_hashes))
-        self.closed = True
-
-    def get_archive_id(self):
-        self.close()
-        return self.archive_id
-
-    def get_location(self):
-        self.close()
-        return self.location
-
-    def get_hash(self):
-        self.close()
-        return self.hash_sha256
+    return part_size

@@ -47,7 +47,7 @@ class GlacierException(Exception):
                  'InvalidParameterValueException': 15, # Parameter not accepted.
                  'DownloadError': 16 }        # Downloading an archive failed.
 
-    def __init__(self, message, code=None, cause=None):
+    def __init__(self, message, code=None, cause=None, data=None):
         """
         Constructor. Logs the error.
 
@@ -57,10 +57,13 @@ class GlacierException(Exception):
         :type code: str
         :param cause: explanation on what caused the error.
         :type cause: str
+        :param data: optional data to add
         """
+
         self.logger = logging.getLogger(self.__class__.__name__)
         self.exitcode = self.ERRORCODE[code] if code in self.ERRORCODE else 254
         self.code = code
+        self.data = data
         if cause:
             self.logger.error('ERROR: %s'% cause)
             self.cause = cause if isinstance(cause, tuple) else (cause,)
@@ -156,7 +159,7 @@ class InputException(GlacierException):
 
     VaultNameError = 1
     VaultDescriptionError = 2
-    def __init__(self, message, code=None, cause=None):
+    def __init__(self, message, code=None, cause=None, data=None):
         """ Handles the exception.
 
         :param message: the error message.
@@ -166,7 +169,7 @@ class InputException(GlacierException):
         :param cause: explanation on what caused the error.
         :type cause: str
         """
-        GlacierException.__init__(self, message, code=code, cause=cause)
+        GlacierException.__init__(self, message, code=code, cause=cause, data=data)
 
 class ConnectionException(GlacierException):
     """
@@ -176,7 +179,7 @@ class ConnectionException(GlacierException):
 
     GlacierConnectionError = 1
     SdbConnectionError = 2
-    def __init__(self, message, code=None, cause=None):
+    def __init__(self, message, code=None, cause=None, data=None):
         """ Handles the exception.
 
         :param message: the error message.
@@ -186,14 +189,14 @@ class ConnectionException(GlacierException):
         :param cause: explanation on what caused the error.
         :type cause: str
         """
-        GlacierException.__init__(self, message, code=code, cause=cause)
+        GlacierException.__init__(self, message, code=code, cause=cause, data=data)
 
 class CommunicationException(GlacierException):
     """
     Exception that is raised when there is something wrong in
     the communication with an external library like boto.
     """
-    def __init__(self, message, code=None, cause=None):
+    def __init__(self, message, code=None, cause=None, data=None):
         """ Handles the exception.
 
         :param message: the error message.
@@ -203,14 +206,14 @@ class CommunicationException(GlacierException):
         :param cause: explanation on what caused the error.
         :type cause: str
         """
-        GlacierException.__init__(self, message, code=code, cause=cause)
+        GlacierException.__init__(self, message, code=code, cause=cause, data=data)
 
 class ResponseException(GlacierException):
     """
     Exception that is raised when there is an http response error.
     """
-    def __init__(self, message, code=None, cause=None):
-        GlacierException.__init__(self, message, code=code, cause=cause)
+    def __init__(self, message, code=None, cause=None, data=None):
+        GlacierException.__init__(self, message, code=code, cause=cause, data=data)
 
 if __name__ == '__main__':
     class ChildrenException(Exception):
@@ -218,11 +221,11 @@ if __name__ == '__main__':
             Exception.__init__(self, message)
 
     class ParentException(GlacierException):
-        def __init__(self, message, cause=None):
+        def __init__(self, message, cause=None, data=None):
             if cause:
-                GlacierException.__init__(self, message, cause=cause)
+                GlacierException.__init__(self, message, cause=cause, data=data)
             else:
-                 GlacierException.__init__(self, message)
+                 GlacierException.__init__(self, message, data=data)
 
     try:
         try:
